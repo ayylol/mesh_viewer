@@ -7,8 +7,8 @@ import log "core:log"
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
 
-SHADER_VERT :: #load("vert.spv")
-SHADER_FRAG :: #load("frag.spv")
+SHADER_VERT :: #load("../build/vert.spv")
+SHADER_FRAG :: #load("../build/frag.spv")
 
 // Enables Vulkan debug logging and validation layers.
 ENABLE_VALIDATION_LAYERS :: #config(ENABLE_VALIDATION_LAYERS, ODIN_DEBUG)
