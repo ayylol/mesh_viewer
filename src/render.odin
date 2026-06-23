@@ -7,15 +7,30 @@ import log "core:log"
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
 
+SHADER_VERT :: #load("vert.spv")
+SHADER_FRAG :: #load("frag.spv")
+
 // Enables Vulkan debug logging and validation layers.
 ENABLE_VALIDATION_LAYERS :: #config(ENABLE_VALIDATION_LAYERS, ODIN_DEBUG)
 
 Context :: struct {
-  window:         ^sdl.Window,
-  instance:       vk.Instance,
-	dbg_messenger:  vk.DebugUtilsMessengerEXT,
-	phys_dev:       vk.PhysicalDevice,
-  surface:        vk.SurfaceKHR,
+  window:                 ^sdl.Window,
+  instance:               vk.Instance,
+	dbgMessenger:           vk.DebugUtilsMessengerEXT,
+	physicalDevice:         vk.PhysicalDevice,
+  surface:                vk.SurfaceKHR,
+	device:                 vk.Device,
+  graphicsQueue:          vk.Queue,
+  presentQueue:           vk.Queue,
+  swapchain:              vk.SwapchainKHR,
+  swapchainImages:        []vk.Image,
+  swapchainViews:         []vk.ImageView,
+  swapchainFormat:        vk.SurfaceFormatKHR,
+  swapchainExtent:        vk.Extent2D,
+  swapchainPresentMode:   vk.PresentModeKHR,
+  swapchainFrameBuffers:  []vk.Framebuffer,
+  vertShaderModule:       vk.ShaderModule,
+  fragShaderModule:       vk.ShaderModule,
 }
 ctx: Context
 
@@ -23,7 +38,7 @@ initSDL :: proc () {
   assert(sdl.Init(sdl.INIT_VIDEO), string(sdl.GetError()))
 
 	ctx.window = sdl.CreateWindow(
-		"Object Viewer", 640, 480,
+		"Object Viewer", 800, 600,
 		sdl.WINDOW_VULKAN | sdl.WINDOW_HIDDEN,
 	)
 	assert(ctx.window != nil, string(sdl.GetError()))
@@ -39,23 +54,28 @@ destroySDL :: proc () {
 
 initVulkan :: proc () {
   // Instance + validation layers
-  create_instance()
+  createInstance()
+  // TODO: Extract debug messenger setup into a function like the tutorial
+
   // Physical device
-	must(pick_physical_device())
+	must(pickPhysicalDevice())
+
   // Surface
   assert(sdl.Vulkan_CreateSurface(ctx.window, ctx.instance, nil, &ctx.surface))
-  // Setup Queue
-  indices := find_queue_families(ctx.phys_dev)
+
+  // TODO: !!move logical device setup to a function
+  // Setup Logical Device
+  indices := findQueueFamilies(ctx.physicalDevice)
   {
     // In case graphics!=present queues
-    indices_set := make(map[u32]struct {}, allocator = context.temp_allocator)
-    indices_set[indices.graphics.?] = {}
-    indices_set[indices.present.?] = {}
+    indexSet := make(map[u32]struct {}, allocator = context.temp_allocator)
+    indexSet[indices.graphics.?] = {}
+    indexSet[indices.present.?] = {}
 
-    queueCIs := make([dynamic]vk.DeviceQueueCreateInfo, 0, len(indices_set), context.temp_allocator)
-    for _ in indices_set {
+    queueCI := make([dynamic]vk.DeviceQueueCreateInfo, 0, len(indexSet), context.temp_allocator)
+    for _ in indexSet {
       append(
-        &queueCIs,
+        &queueCI,
         vk.DeviceQueueCreateInfo {
           sType = .DEVICE_QUEUE_CREATE_INFO,
           queueFamilyIndex = indices.graphics.?,
@@ -65,24 +85,65 @@ initVulkan :: proc () {
       )
     }
 
-  }
+    // Using core features instead of extensions saves us code
+    enabledVk12Features := vk.PhysicalDeviceVulkan12Features {
+      sType = .PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+      descriptorIndexing = true,
+      shaderSampledImageArrayNonUniformIndexing = true,
+      descriptorBindingVariableDescriptorCount = true,
+      runtimeDescriptorArray = true,
+      bufferDeviceAddress = true
+    }
+    enabledVk13Features := vk.PhysicalDeviceVulkan13Features {
+        sType = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+        pNext = &enabledVk12Features,
+        synchronization2 = true,
+        dynamicRendering = true,
+    }
+    enabledVk10Features := vk.PhysicalDeviceFeatures {
+        samplerAnisotropy = true
+    }
 
-  // Logical Device Setup
-  // Setting up Vulkan Mem Allocator
+    deviceExtensions:[]cstring={ vk.KHR_SWAPCHAIN_EXTENSION_NAME }
+    deviceCI := vk.DeviceCreateInfo {
+      sType = .DEVICE_CREATE_INFO,
+      pNext = &enabledVk13Features,
+      queueCreateInfoCount = u32(len(queueCI)),
+      pQueueCreateInfos = raw_data(queueCI),
+      enabledExtensionCount = u32(len(deviceExtensions)),
+      ppEnabledExtensionNames = raw_data(deviceExtensions),
+      pEnabledFeatures = &enabledVk10Features
+    }
+		must(vk.CreateDevice(ctx.physicalDevice, &deviceCI, nil, &ctx.device))
+
+    vk.GetDeviceQueue(ctx.device, indices.graphics.?, 0, &ctx.graphicsQueue)
+		vk.GetDeviceQueue(ctx.device, indices.present.?, 0, &ctx.presentQueue)
+  }
+  // TODO: HOW TO DO VULKAN MEMORY ALLOCATIONS???
+
   // SwapChain
-  // Depth Attachment
+  createSwapchain()
+
+  // TODO: Left of: make this function call
+  // Create Image Views
+  // Create Graphics Pipeline
+  createGraphicsPipeline()
 }
 
 destroyVulkan :: proc () {
+  vk.DestroyShaderModule(ctx.device, ctx.vertShaderModule, nil)
+  vk.DestroyShaderModule(ctx.device, ctx.fragShaderModule, nil)
+  destroySwapchain()
+  vk.DestroyDevice(ctx.device, nil)
   vk.DestroySurfaceKHR(ctx.instance, ctx.surface, nil)
   when ENABLE_VALIDATION_LAYERS {
-    vk.DestroyDebugUtilsMessengerEXT(ctx.instance, ctx.dbg_messenger, nil)
+    vk.DestroyDebugUtilsMessengerEXT(ctx.instance, ctx.dbgMessenger, nil)
 	}
   vk.DestroyInstance(ctx.instance, nil)
 }
 
 // Sets up instance and validation layers
-create_instance :: proc() {
+createInstance :: proc() {
   vk.load_proc_addresses_global(rawptr(sdl.Vulkan_GetVkGetInstanceProcAddr()))
 	assert(vk.CreateInstance != nil, "vulkan function pointers not loaded")
   
@@ -129,9 +190,9 @@ create_instance :: proc() {
 			sType           = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
 			messageSeverity = severity,
 			messageType     = {.GENERAL, .VALIDATION, .PERFORMANCE, .DEVICE_ADDRESS_BINDING}, // all
-			pfnUserCallback = vk_messenger_callback,
+			pfnUserCallback = vkMessengerCallback,
 		}
-		instanceCI.pNext = &dbgCI
+		instanceCI.pNext = &dbgCI 
 	}
 	instanceCI.enabledExtensionCount = u32(len(extensions))
 	instanceCI.ppEnabledExtensionNames = raw_data(extensions)
@@ -140,13 +201,13 @@ create_instance :: proc() {
   vk.load_proc_addresses_instance(ctx.instance)
 
   when ENABLE_VALIDATION_LAYERS {
-		must(vk.CreateDebugUtilsMessengerEXT(ctx.instance, &dbgCI, nil, &ctx.dbg_messenger))
+		must(vk.CreateDebugUtilsMessengerEXT(ctx.instance, &dbgCI, nil, &ctx.dbgMessenger))
 	}
 }
 
 // TODO: actually do gpu rankings
 @(require_results)
-pick_physical_device :: proc() -> vk.Result {
+pickPhysicalDevice :: proc() -> vk.Result {
 	count: u32
 	vk.EnumeratePhysicalDevices(ctx.instance, &count, nil) or_return
 	if count == 0 {log.panic("vulkan: no GPU found")}
@@ -155,22 +216,22 @@ pick_physical_device :: proc() -> vk.Result {
 	devices := make([]vk.PhysicalDevice, count, context.temp_allocator)
 	vk.EnumeratePhysicalDevices(ctx.instance, &count, raw_data(devices)) or_return
 
-  ctx.phys_dev=devices[0]
+  ctx.physicalDevice=devices[0]
 
   props: vk.PhysicalDeviceProperties
-	vk.GetPhysicalDeviceProperties(ctx.phys_dev, &props)
+	vk.GetPhysicalDeviceProperties(ctx.physicalDevice, &props)
   name := strings.truncate_to_byte(string(props.deviceName[:]), 0)
 	log.infof("vulkan: Using physical device %q", name)
 
 	return .SUCCESS
 }
 
-Queue_Family_Indices :: struct {
+QueueFamilyIndices :: struct {
 	graphics: Maybe(u32),
 	present:  Maybe(u32),
 }
 
-find_queue_families :: proc(device: vk.PhysicalDevice) -> (ids: Queue_Family_Indices) {
+findQueueFamilies :: proc(device: vk.PhysicalDevice) -> (ids: QueueFamilyIndices) {
 	count: u32
 	vk.GetPhysicalDeviceQueueFamilyProperties(device, &count, nil)
 
@@ -189,9 +250,9 @@ find_queue_families :: proc(device: vk.PhysicalDevice) -> (ids: Queue_Family_Ind
 		}
 
 		// Found all needed queues?
-		_, has_graphics := ids.graphics.?
-		_, has_present := ids.present.?
-		if has_graphics && has_present {
+		_, hasGraphics := ids.graphics.?
+		_, hasPresent := ids.present.?
+		if hasGraphics && hasPresent {
 			break
 		}
 	}
@@ -199,7 +260,176 @@ find_queue_families :: proc(device: vk.PhysicalDevice) -> (ids: Queue_Family_Ind
 	return
 }
 
-vk_messenger_callback :: proc "system" (
+createSwapchain :: proc() {
+	indices := findQueueFamilies(ctx.physicalDevice)
+
+	// Setup swapchain.
+	{
+		support, result := querySwapchainSupport(ctx.physicalDevice, context.temp_allocator)
+		if result != .SUCCESS {
+			log.panicf("vulkan: query swapchain failed: %v", result)
+		}
+
+		surfaceFormat := chooseSwapchainSurfaceFormat(support.formats)
+
+		ctx.swapchainFormat = surfaceFormat
+		ctx.swapchainExtent = chooseSwapchainExtent(support.capabilities)
+    ctx.swapchainPresentMode = chooseSwapchainPresentMode(support.presentModes)
+
+		imageCount := support.capabilities.minImageCount + 1
+		if support.capabilities.maxImageCount > 0 && imageCount > support.capabilities.maxImageCount {
+			imageCount = support.capabilities.maxImageCount
+		}
+
+		swapchainCI := vk.SwapchainCreateInfoKHR {
+			sType            = .SWAPCHAIN_CREATE_INFO_KHR,
+			surface          = ctx.surface,
+			minImageCount    = imageCount,
+			imageFormat      = surfaceFormat.format,
+			imageColorSpace  = surfaceFormat.colorSpace,
+			imageExtent      = ctx.swapchainExtent,
+			imageArrayLayers = 1,
+			imageUsage       = {.COLOR_ATTACHMENT},
+			preTransform     = support.capabilities.currentTransform,
+			compositeAlpha   = {.OPAQUE},
+			presentMode      = ctx.swapchainPresentMode,
+			clipped          = true,
+		}
+
+    // TODO: Not sure if this case works, because I can't test it
+		if indices.graphics != indices.present {
+			swapchainCI.imageSharingMode = .CONCURRENT
+			swapchainCI.queueFamilyIndexCount = 2
+			swapchainCI.pQueueFamilyIndices = raw_data([]u32{indices.graphics.?, indices.present.?})
+		}
+
+		must(vk.CreateSwapchainKHR(ctx.device, &swapchainCI, nil, &ctx.swapchain))
+	}
+
+	// Setup swapchain images.
+  // TODO: extract to its own function to more closely follow the Vulkan guide
+	{
+		count: u32
+		must(vk.GetSwapchainImagesKHR(ctx.device, ctx.swapchain, &count, nil))
+
+		ctx.swapchainImages = make([]vk.Image, count)
+		ctx.swapchainViews = make([]vk.ImageView, count)
+		must(vk.GetSwapchainImagesKHR(ctx.device, ctx.swapchain, &count, raw_data(ctx.swapchainImages)))
+
+		for image, i in ctx.swapchainImages {
+			swapchainImageViewCI := vk.ImageViewCreateInfo {
+				sType = .IMAGE_VIEW_CREATE_INFO,
+				image = image,
+				viewType = .D2,
+				format = ctx.swapchainFormat.format,
+				subresourceRange = {aspectMask = {.COLOR}, levelCount = 1, layerCount = 1},
+			}
+			must(vk.CreateImageView(ctx.device, &swapchainImageViewCI, nil, &ctx.swapchainViews[i]))
+		}
+	}
+}
+
+destroySwapchain :: proc() {
+	for view in ctx.swapchainViews {
+		vk.DestroyImageView(ctx.device, view, nil)
+	}
+	delete(ctx.swapchainViews)
+	delete(ctx.swapchainImages)
+  vk.DestroySwapchainKHR(ctx.device, ctx.swapchain, nil)
+}
+
+SwapchainSupport :: struct {
+	capabilities: vk.SurfaceCapabilitiesKHR,
+	formats:      []vk.SurfaceFormatKHR,
+	presentModes: []vk.PresentModeKHR,
+}
+
+querySwapchainSupport :: proc(
+	device: vk.PhysicalDevice,
+	allocator := context.temp_allocator,
+) -> (
+	support: SwapchainSupport,
+	result: vk.Result,
+) {
+	// NOTE: looks like a wrong binding with the third arg being a multipointer.
+	vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(device, ctx.surface, &support.capabilities) or_return
+
+	{
+		count: u32
+		vk.GetPhysicalDeviceSurfaceFormatsKHR(device, ctx.surface, &count, nil) or_return
+
+		support.formats = make([]vk.SurfaceFormatKHR, count, allocator)
+		vk.GetPhysicalDeviceSurfaceFormatsKHR(device, ctx.surface, &count, raw_data(support.formats)) or_return
+	}
+
+	{
+		count: u32
+		vk.GetPhysicalDeviceSurfacePresentModesKHR(device, ctx.surface, &count, nil) or_return
+
+		support.presentModes = make([]vk.PresentModeKHR, count, allocator)
+		vk.GetPhysicalDeviceSurfacePresentModesKHR(device, ctx.surface, &count, raw_data(support.presentModes)) or_return
+	}
+
+	return
+}
+
+chooseSwapchainSurfaceFormat :: proc(formats: []vk.SurfaceFormatKHR) -> vk.SurfaceFormatKHR {
+	for format in formats {
+		if format.format == .B8G8R8A8_SRGB && format.colorSpace == .SRGB_NONLINEAR {
+			return format
+		}
+	}
+
+	// Fallback non optimal.
+	return formats[0]
+}
+
+chooseSwapchainPresentMode :: proc(modes: []vk.PresentModeKHR) -> vk.PresentModeKHR {
+	// We would like mailbox for the best tradeoff between tearing and latency.
+	for mode in modes {
+		if mode == .MAILBOX {
+			return .MAILBOX
+		}
+	}
+
+	// As a fallback, fifo (basically vsync) is always available.
+	return .FIFO
+}
+
+chooseSwapchainExtent :: proc(capabilities: vk.SurfaceCapabilitiesKHR) -> vk.Extent2D {
+	if capabilities.currentExtent.width != max(u32) {
+		return capabilities.currentExtent
+	}
+
+	width, height : i32
+  sdl.GetWindowSize(ctx.window, &width, &height)
+	return(
+		vk.Extent2D {
+			width = clamp(u32(width), capabilities.minImageExtent.width, capabilities.maxImageExtent.width),
+			height = clamp(u32(height), capabilities.minImageExtent.height, capabilities.maxImageExtent.height),
+		} 
+	)
+}
+
+createGraphicsPipeline :: proc(){
+  ctx.vertShaderModule=createShaderModule(SHADER_VERT)
+  ctx.fragShaderModule=createShaderModule(SHADER_FRAG)
+
+  // TODO: Left of: Shader stage creation
+}
+
+createShaderModule :: proc(code: []byte) -> (module: vk.ShaderModule) {
+  as_u32 := slice.reinterpret([]u32, code)
+  shaderModuleCI:= vk.ShaderModuleCreateInfo {
+    sType = .SHADER_MODULE_CREATE_INFO,
+    codeSize = len(code),
+    pCode = raw_data(as_u32)
+  }
+  must(vk.CreateShaderModule(ctx.device, &shaderModuleCI, nil, &module))
+  return
+}
+
+vkMessengerCallback :: proc "system" (
 	messageSeverity: vk.DebugUtilsMessageSeverityFlagsEXT,
 	messageTypes: vk.DebugUtilsMessageTypeFlagsEXT,
 	pCallbackData: ^vk.DebugUtilsMessengerCallbackDataEXT,
