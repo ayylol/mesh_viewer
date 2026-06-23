@@ -22,15 +22,16 @@ Context :: struct {
 	device:                 vk.Device,
   graphicsQueue:          vk.Queue,
   presentQueue:           vk.Queue,
-  swapchain:              vk.SwapchainKHR,
-  swapchainImages:        []vk.Image,
-  swapchainViews:         []vk.ImageView,
-  swapchainFormat:        vk.SurfaceFormatKHR,
-  swapchainExtent:        vk.Extent2D,
-  swapchainPresentMode:   vk.PresentModeKHR,
-  swapchainFrameBuffers:  []vk.Framebuffer,
+  swapChain:              vk.SwapchainKHR,
+  swapChainImages:        []vk.Image,
+  swapChainViews:         []vk.ImageView,
+  swapChainFormat:        vk.SurfaceFormatKHR,
+  swapChainExtent:        vk.Extent2D,
+  swapChainPresentMode:   vk.PresentModeKHR,
+  swapChainFrameBuffers:  []vk.Framebuffer,
   vertShaderModule:       vk.ShaderModule,
   fragShaderModule:       vk.ShaderModule,
+  shader_stages:          [2]vk.PipelineShaderStageCreateInfo,
 }
 ctx: Context
 
@@ -272,9 +273,9 @@ createSwapchain :: proc() {
 
 		surfaceFormat := chooseSwapchainSurfaceFormat(support.formats)
 
-		ctx.swapchainFormat = surfaceFormat
-		ctx.swapchainExtent = chooseSwapchainExtent(support.capabilities)
-    ctx.swapchainPresentMode = chooseSwapchainPresentMode(support.presentModes)
+		ctx.swapChainFormat = surfaceFormat
+		ctx.swapChainExtent = chooseSwapchainExtent(support.capabilities)
+    ctx.swapChainPresentMode = chooseSwapchainPresentMode(support.presentModes)
 
 		imageCount := support.capabilities.minImageCount + 1
 		if support.capabilities.maxImageCount > 0 && imageCount > support.capabilities.maxImageCount {
@@ -287,12 +288,12 @@ createSwapchain :: proc() {
 			minImageCount    = imageCount,
 			imageFormat      = surfaceFormat.format,
 			imageColorSpace  = surfaceFormat.colorSpace,
-			imageExtent      = ctx.swapchainExtent,
+			imageExtent      = ctx.swapChainExtent,
 			imageArrayLayers = 1,
 			imageUsage       = {.COLOR_ATTACHMENT},
 			preTransform     = support.capabilities.currentTransform,
 			compositeAlpha   = {.OPAQUE},
-			presentMode      = ctx.swapchainPresentMode,
+			presentMode      = ctx.swapChainPresentMode,
 			clipped          = true,
 		}
 
@@ -303,39 +304,39 @@ createSwapchain :: proc() {
 			swapchainCI.pQueueFamilyIndices = raw_data([]u32{indices.graphics.?, indices.present.?})
 		}
 
-		must(vk.CreateSwapchainKHR(ctx.device, &swapchainCI, nil, &ctx.swapchain))
+		must(vk.CreateSwapchainKHR(ctx.device, &swapchainCI, nil, &ctx.swapChain))
 	}
 
 	// Setup swapchain images.
   // TODO: extract to its own function to more closely follow the Vulkan guide
 	{
 		count: u32
-		must(vk.GetSwapchainImagesKHR(ctx.device, ctx.swapchain, &count, nil))
+		must(vk.GetSwapchainImagesKHR(ctx.device, ctx.swapChain, &count, nil))
 
-		ctx.swapchainImages = make([]vk.Image, count)
-		ctx.swapchainViews = make([]vk.ImageView, count)
-		must(vk.GetSwapchainImagesKHR(ctx.device, ctx.swapchain, &count, raw_data(ctx.swapchainImages)))
+		ctx.swapChainImages = make([]vk.Image, count)
+		ctx.swapChainViews = make([]vk.ImageView, count)
+		must(vk.GetSwapchainImagesKHR(ctx.device, ctx.swapChain, &count, raw_data(ctx.swapChainImages)))
 
-		for image, i in ctx.swapchainImages {
+		for image, i in ctx.swapChainImages {
 			swapchainImageViewCI := vk.ImageViewCreateInfo {
 				sType = .IMAGE_VIEW_CREATE_INFO,
 				image = image,
 				viewType = .D2,
-				format = ctx.swapchainFormat.format,
+				format = ctx.swapChainFormat.format,
 				subresourceRange = {aspectMask = {.COLOR}, levelCount = 1, layerCount = 1},
 			}
-			must(vk.CreateImageView(ctx.device, &swapchainImageViewCI, nil, &ctx.swapchainViews[i]))
+			must(vk.CreateImageView(ctx.device, &swapchainImageViewCI, nil, &ctx.swapChainViews[i]))
 		}
 	}
 }
 
 destroySwapchain :: proc() {
-	for view in ctx.swapchainViews {
+	for view in ctx.swapChainViews {
 		vk.DestroyImageView(ctx.device, view, nil)
 	}
-	delete(ctx.swapchainViews)
-	delete(ctx.swapchainImages)
-  vk.DestroySwapchainKHR(ctx.device, ctx.swapchain, nil)
+	delete(ctx.swapChainViews)
+	delete(ctx.swapChainImages)
+  vk.DestroySwapchainKHR(ctx.device, ctx.swapChain, nil)
 }
 
 SwapchainSupport :: struct {
@@ -415,7 +416,78 @@ createGraphicsPipeline :: proc(){
   ctx.vertShaderModule=createShaderModule(SHADER_VERT)
   ctx.fragShaderModule=createShaderModule(SHADER_FRAG)
 
-  // TODO: Left of: Shader stage creation
+  vertShaderStageCI := vk.PipelineShaderStageCreateInfo {
+    sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+    stage = {.VERTEX},
+    module = ctx.vertShaderModule,
+    pName = "main"
+  }
+  fragShaderStageCI := vk.PipelineShaderStageCreateInfo {
+    sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+    stage = {.FRAGMENT},
+    module = ctx.fragShaderModule,
+    pName = "main"
+  }
+  ctx.shader_stages[0]=vertShaderStageCI
+  ctx.shader_stages[1]=fragShaderStageCI
+  
+	dynamicStates := []vk.DynamicState{.VIEWPORT, .SCISSOR}
+  dynamicStateCI := vk.PipelineDynamicStateCreateInfo {
+    sType             = .PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+    dynamicStateCount = u32(len(dynamicStates)),
+    pDynamicStates    = raw_data(dynamicStates),
+  }
+
+  vertexInputCI := vk.PipelineVertexInputStateCreateInfo {
+    sType = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+    vertexBindingDescriptionCount = 0,
+    pVertexBindingDescriptions = nil,
+    vertexAttributeDescriptionCount = 0,
+    pVertexAttributeDescriptions = nil
+  }
+
+  inputAssemblyCI := vk.PipelineInputAssemblyStateCreateInfo {
+    sType = .PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+    topology = .TRIANGLE_LIST,
+    primitiveRestartEnable = false
+  }
+
+  viewport:=vk.Viewport{
+    x = 0.0,
+    y = 0.0,
+    width = f32(ctx.swapChainExtent.width),
+    height = f32(ctx.swapChainExtent.height),
+    minDepth = 0.0,
+    maxDepth = 1.0,
+  }
+
+  scissor:=vk.Rect2D {
+    offset = {0, 0},
+    extent = ctx.swapChainExtent
+  }
+
+  viewportStateCI := vk.PipelineViewportStateCreateInfo {
+    sType = .PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+    viewportCount = 1,
+    scissorCount = 1,
+  }
+
+  rasterizerCI := vk.PipelineRasterizationStateCreateInfo {
+    sType = .PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+    depthClampEnable = false,
+    rasterizerDiscardEnable = false,
+    polygonMode = .FILL,
+    lineWidth = 1.0,
+    cullMode = {.BACK},
+    frontFace = .CLOCKWISE,
+    depthBiasEnable = false,
+    depthBiasConstantFactor = 0.0,
+    depthBiasClamp = 0.0,
+    depthBiasSlopeFactor = 0.0,
+  }
+
+  // TODO: left off here (multisampling)
+
 }
 
 createShaderModule :: proc(code: []byte) -> (module: vk.ShaderModule) {
