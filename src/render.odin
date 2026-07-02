@@ -14,27 +14,32 @@ SHADER_FRAG :: #load("../build/frag.spv")
 ENABLE_VALIDATION_LAYERS :: #config(ENABLE_VALIDATION_LAYERS, ODIN_DEBUG)
 
 Context :: struct {
-  window:                 ^sdl.Window,
-  instance:               vk.Instance,
-	dbgMessenger:           vk.DebugUtilsMessengerEXT,
-	physicalDevice:         vk.PhysicalDevice,
-  surface:                vk.SurfaceKHR,
-	device:                 vk.Device,
-  graphicsQueue:          vk.Queue,
-  presentQueue:           vk.Queue,
-  swapChain:              vk.SwapchainKHR,
-  swapChainImages:        []vk.Image,
-  swapChainViews:         []vk.ImageView,
-  swapChainFormat:        vk.SurfaceFormatKHR,
-  swapChainExtent:        vk.Extent2D,
-  swapChainPresentMode:   vk.PresentModeKHR,
-  swapChainFrameBuffers:  []vk.Framebuffer,
-  vertShaderModule:       vk.ShaderModule,
-  fragShaderModule:       vk.ShaderModule,
-  shaderStages:           [2]vk.PipelineShaderStageCreateInfo,
-  renderPass:             vk.RenderPass,
-  pipelineLayout:         vk.PipelineLayout,
-  graphicsPipeline:       vk.Pipeline,
+  window:                   ^sdl.Window,
+  instance:                 vk.Instance,
+  dbgMessenger:             vk.DebugUtilsMessengerEXT,
+  physicalDevice:           vk.PhysicalDevice,
+  surface:                  vk.SurfaceKHR,
+  device:                   vk.Device,
+  graphicsQueue:            vk.Queue,
+  presentQueue:             vk.Queue,
+  swapchain:                vk.SwapchainKHR,
+  swapchainImages:          []vk.Image,
+  swapchainViews:           []vk.ImageView,
+  swapchainFormat:          vk.SurfaceFormatKHR,
+  swapchainExtent:          vk.Extent2D,
+  swapchainPresentMode:     vk.PresentModeKHR,
+  swapchainFramebuffers:    []vk.Framebuffer,
+  vertShaderModule:         vk.ShaderModule,
+  fragShaderModule:         vk.ShaderModule,
+  shaderStages:             [2]vk.PipelineShaderStageCreateInfo,
+  renderPass:               vk.RenderPass,
+  pipelineLayout:           vk.PipelineLayout,
+  graphicsPipeline:         vk.Pipeline,
+  commandPool:              vk.CommandPool,
+  commandBuffer:            vk.CommandBuffer,
+  imageAvailableSemaphore:  vk.Semaphore,
+  renderFinishedSemaphore:  vk.Semaphore, 
+  inFlightFence:            vk.Fence,
 }
 ctx: Context
 
@@ -131,10 +136,21 @@ initVulkan :: proc () {
   createRenderPass()
   createGraphicsPipeline()
 
-  // TODO: left off here: create frame buffer
+  createFramebuffers()
+
+  createCommandPool()
+  createCommandBuffer()
+
+  createSyncObjects()
 }
 
 destroyVulkan :: proc () {
+  vk.DeviceWaitIdle(ctx.device)
+
+  vk.DestroyFence(ctx.device, ctx.inFlightFence, nil)
+  vk.DestroySemaphore(ctx.device, ctx.renderFinishedSemaphore, nil)
+  vk.DestroySemaphore(ctx.device, ctx.imageAvailableSemaphore, nil)
+  vk.DestroyCommandPool(ctx.device, ctx.commandPool, nil)
   vk.DestroyRenderPass(ctx.device, ctx.renderPass, nil)
   vk.DestroyPipeline(ctx.device, ctx.graphicsPipeline, nil)
   vk.DestroyPipelineLayout(ctx.device, ctx.pipelineLayout, nil)
@@ -279,9 +295,9 @@ createSwapchain :: proc() {
 
 		surfaceFormat := chooseSwapchainSurfaceFormat(support.formats)
 
-		ctx.swapChainFormat = surfaceFormat
-		ctx.swapChainExtent = chooseSwapchainExtent(support.capabilities)
-    ctx.swapChainPresentMode = chooseSwapchainPresentMode(support.presentModes)
+		ctx.swapchainFormat = surfaceFormat
+		ctx.swapchainExtent = chooseSwapchainExtent(support.capabilities)
+    ctx.swapchainPresentMode = chooseSwapchainPresentMode(support.presentModes)
 
 		imageCount := support.capabilities.minImageCount + 1
 		if support.capabilities.maxImageCount > 0 && imageCount > support.capabilities.maxImageCount {
@@ -294,12 +310,12 @@ createSwapchain :: proc() {
 			minImageCount    = imageCount,
 			imageFormat      = surfaceFormat.format,
 			imageColorSpace  = surfaceFormat.colorSpace,
-			imageExtent      = ctx.swapChainExtent,
+			imageExtent      = ctx.swapchainExtent,
 			imageArrayLayers = 1,
 			imageUsage       = {.COLOR_ATTACHMENT},
 			preTransform     = support.capabilities.currentTransform,
 			compositeAlpha   = {.OPAQUE},
-			presentMode      = ctx.swapChainPresentMode,
+			presentMode      = ctx.swapchainPresentMode,
 			clipped          = true,
 		}
 
@@ -310,39 +326,42 @@ createSwapchain :: proc() {
 			swapchainCI.pQueueFamilyIndices = raw_data([]u32{indices.graphics.?, indices.present.?})
 		}
 
-		must(vk.CreateSwapchainKHR(ctx.device, &swapchainCI, nil, &ctx.swapChain))
+		must(vk.CreateSwapchainKHR(ctx.device, &swapchainCI, nil, &ctx.swapchain))
 	}
 
 	// Setup swapchain images.
   // TODO: extract to its own function to more closely follow the Vulkan guide
 	{
 		count: u32
-		must(vk.GetSwapchainImagesKHR(ctx.device, ctx.swapChain, &count, nil))
+		must(vk.GetSwapchainImagesKHR(ctx.device, ctx.swapchain, &count, nil))
 
-		ctx.swapChainImages = make([]vk.Image, count)
-		ctx.swapChainViews = make([]vk.ImageView, count)
-		must(vk.GetSwapchainImagesKHR(ctx.device, ctx.swapChain, &count, raw_data(ctx.swapChainImages)))
+		ctx.swapchainImages = make([]vk.Image, count)
+		ctx.swapchainViews = make([]vk.ImageView, count)
+		must(vk.GetSwapchainImagesKHR(ctx.device, ctx.swapchain, &count, raw_data(ctx.swapchainImages)))
 
-		for image, i in ctx.swapChainImages {
+		for image, i in ctx.swapchainImages {
 			swapchainImageViewCI := vk.ImageViewCreateInfo {
 				sType = .IMAGE_VIEW_CREATE_INFO,
 				image = image,
 				viewType = .D2,
-				format = ctx.swapChainFormat.format,
+				format = ctx.swapchainFormat.format,
 				subresourceRange = {aspectMask = {.COLOR}, levelCount = 1, layerCount = 1},
 			}
-			must(vk.CreateImageView(ctx.device, &swapchainImageViewCI, nil, &ctx.swapChainViews[i]))
+			must(vk.CreateImageView(ctx.device, &swapchainImageViewCI, nil, &ctx.swapchainViews[i]))
 		}
 	}
 }
 
 destroySwapchain :: proc() {
-	for view in ctx.swapChainViews {
+	for framebuffer in ctx.swapchainFramebuffers {
+		vk.DestroyFramebuffer(ctx.device, framebuffer, nil)
+	}
+	for view in ctx.swapchainViews {
 		vk.DestroyImageView(ctx.device, view, nil)
 	}
-	delete(ctx.swapChainViews)
-	delete(ctx.swapChainImages)
-  vk.DestroySwapchainKHR(ctx.device, ctx.swapChain, nil)
+	delete(ctx.swapchainViews)
+	delete(ctx.swapchainImages)
+  vk.DestroySwapchainKHR(ctx.device, ctx.swapchain, nil)
 }
 
 SwapchainSupport :: struct {
@@ -420,7 +439,7 @@ chooseSwapchainExtent :: proc(capabilities: vk.SurfaceCapabilitiesKHR) -> vk.Ext
 
 createRenderPass :: proc(){
   colorAttachment := vk.AttachmentDescription {
-    format = ctx.swapChainFormat.format,
+    format = ctx.swapchainFormat.format,
     samples = {._1},
     loadOp = .CLEAR,
     storeOp = .STORE,
@@ -438,13 +457,26 @@ createRenderPass :: proc(){
     colorAttachmentCount = 1,
     pColorAttachments = &colorAttachmentRef,
   }
+
+  dependency := vk.SubpassDependency {
+    srcSubpass = vk.SUBPASS_EXTERNAL,
+    dstSubpass = 0,
+    srcStageMask = {.COLOR_ATTACHMENT_OUTPUT},
+    srcAccessMask = {},
+    dstStageMask = {.COLOR_ATTACHMENT_OUTPUT},
+    dstAccessMask = {.COLOR_ATTACHMENT_WRITE},
+  }
+
   renderPassCI := vk.RenderPassCreateInfo {
     sType = .RENDER_PASS_CREATE_INFO,
     attachmentCount = 1,
     pAttachments = &colorAttachment,
     subpassCount = 1,
     pSubpasses = &subpass,
+    dependencyCount = 1,
+    pDependencies = &dependency,
   }
+
   must(vk.CreateRenderPass(ctx.device, &renderPassCI, nil, &ctx.renderPass))
 }
 
@@ -491,15 +523,15 @@ createGraphicsPipeline :: proc(){
   viewport:=vk.Viewport{
     x = 0.0,
     y = 0.0,
-    width = f32(ctx.swapChainExtent.width),
-    height = f32(ctx.swapChainExtent.height),
+    width = f32(ctx.swapchainExtent.width),
+    height = f32(ctx.swapchainExtent.height),
     minDepth = 0.0,
     maxDepth = 1.0,
   }
 
   scissor:=vk.Rect2D {
     offset = {0, 0},
-    extent = ctx.swapChainExtent
+    extent = ctx.swapchainExtent
   }
 
   viewportStateCI := vk.PipelineViewportStateCreateInfo {
@@ -590,6 +622,96 @@ createShaderModule :: proc(code: []byte) -> (module: vk.ShaderModule) {
   }
   must(vk.CreateShaderModule(ctx.device, &shaderModuleCI, nil, &module))
   return
+}
+
+createFramebuffers :: proc() {
+  ctx.swapchainFramebuffers = make([]vk.Framebuffer, len(ctx.swapchainViews))
+  for view, i in ctx.swapchainViews {
+		attachments := []vk.ImageView{view}
+    framebufferInfo := vk.FramebufferCreateInfo {
+      sType = .FRAMEBUFFER_CREATE_INFO,
+      renderPass = ctx.renderPass,
+      attachmentCount = 1,
+      pAttachments = &attachments[0],
+      width = ctx.swapchainExtent.width,
+      height = ctx.swapchainExtent.height,
+      layers = 1,
+    }
+    must(vk.CreateFramebuffer(ctx.device, &framebufferInfo, nil, &ctx.swapchainFramebuffers[i]))
+  }
+}
+
+createCommandPool :: proc() {
+  indices := findQueueFamilies(ctx.physicalDevice)
+  poolCI := vk.CommandPoolCreateInfo {
+    sType = .COMMAND_POOL_CREATE_INFO,
+    flags = {.RESET_COMMAND_BUFFER},
+    queueFamilyIndex = indices.graphics.?,
+  }
+  must(vk.CreateCommandPool(ctx.device, &poolCI, nil, &ctx.commandPool))
+}
+
+createCommandBuffer :: proc() {
+  allocInfo := vk.CommandBufferAllocateInfo {
+    sType = .COMMAND_BUFFER_ALLOCATE_INFO,
+    commandPool = ctx.commandPool,
+    level = .PRIMARY,
+    commandBufferCount = 1,
+  }
+
+  must(vk.AllocateCommandBuffers(ctx.device, &allocInfo, &ctx.commandBuffer))
+}
+
+recordCommandBuffer :: proc(commandBuffer: vk.CommandBuffer, imageIndex: u32) {
+  beginInfo := vk.CommandBufferBeginInfo {
+    sType = .COMMAND_BUFFER_BEGIN_INFO,
+    flags = {},
+    pInheritanceInfo = nil,
+  }
+  must(vk.BeginCommandBuffer(commandBuffer, &beginInfo))
+
+	clear_color := vk.ClearValue{}
+	clear_color.color.float32 = {0.0, 0.0, 0.0, 1.0}
+
+  renderPassInfo := vk.RenderPassBeginInfo {
+    sType = .RENDER_PASS_BEGIN_INFO,
+    renderPass = ctx.renderPass,
+    framebuffer = ctx.swapchainFramebuffers[imageIndex],
+    renderArea = {extent = ctx.swapchainExtent},
+		clearValueCount = 1,
+		pClearValues = &clear_color,
+  }
+
+  vk.CmdBeginRenderPass(commandBuffer, &renderPassInfo, .INLINE)
+  vk.CmdBindPipeline(commandBuffer, .GRAPHICS, ctx.graphicsPipeline)
+
+  viewport := vk.Viewport {
+    x = 0.0,
+    y = 0.0,
+    width = f32(ctx.swapchainExtent.width),
+    height = f32(ctx.swapchainExtent.height),
+    minDepth = 0.0,
+    maxDepth = 1.0,
+  }
+  vk.CmdSetViewport(ctx.commandBuffer, 0, 1, &viewport);
+
+  scissor := vk.Rect2D {
+    offset = {0, 0},
+    extent = ctx.swapchainExtent,
+  }
+  vk.CmdSetScissor(ctx.commandBuffer, 0, 1, &scissor);
+
+  vk.CmdDraw(ctx.commandBuffer, 3, 1, 0, 0)
+  vk.CmdEndRenderPass(ctx.commandBuffer)
+  must(vk.EndCommandBuffer(ctx.commandBuffer))
+}
+
+createSyncObjects :: proc () {
+  semaphoreCI := vk.SemaphoreCreateInfo { sType = .SEMAPHORE_CREATE_INFO }
+  fenceCI := vk.FenceCreateInfo { sType = .FENCE_CREATE_INFO, flags = {.SIGNALED} }
+  must(vk.CreateSemaphore(ctx.device, &semaphoreCI, nil, &ctx.imageAvailableSemaphore))
+  must(vk.CreateSemaphore(ctx.device, &semaphoreCI, nil, &ctx.renderFinishedSemaphore))
+  must(vk.CreateFence(ctx.device, &fenceCI, nil, &ctx.inFlightFence))
 }
 
 vkMessengerCallback :: proc "system" (
