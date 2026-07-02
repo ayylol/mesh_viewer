@@ -31,7 +31,10 @@ Context :: struct {
   swapChainFrameBuffers:  []vk.Framebuffer,
   vertShaderModule:       vk.ShaderModule,
   fragShaderModule:       vk.ShaderModule,
-  shader_stages:          [2]vk.PipelineShaderStageCreateInfo,
+  shaderStages:           [2]vk.PipelineShaderStageCreateInfo,
+  renderPass:             vk.RenderPass,
+  pipelineLayout:         vk.PipelineLayout,
+  graphicsPipeline:       vk.Pipeline,
 }
 ctx: Context
 
@@ -125,13 +128,16 @@ initVulkan :: proc () {
   // SwapChain
   createSwapchain()
 
-  // TODO: Left of: make this function call
-  // Create Image Views
-  // Create Graphics Pipeline
+  createRenderPass()
   createGraphicsPipeline()
+
+  // TODO: left off here: create frame buffer
 }
 
 destroyVulkan :: proc () {
+  vk.DestroyRenderPass(ctx.device, ctx.renderPass, nil)
+  vk.DestroyPipeline(ctx.device, ctx.graphicsPipeline, nil)
+  vk.DestroyPipelineLayout(ctx.device, ctx.pipelineLayout, nil)
   vk.DestroyShaderModule(ctx.device, ctx.vertShaderModule, nil)
   vk.DestroyShaderModule(ctx.device, ctx.fragShaderModule, nil)
   destroySwapchain()
@@ -412,6 +418,36 @@ chooseSwapchainExtent :: proc(capabilities: vk.SurfaceCapabilitiesKHR) -> vk.Ext
 	)
 }
 
+createRenderPass :: proc(){
+  colorAttachment := vk.AttachmentDescription {
+    format = ctx.swapChainFormat.format,
+    samples = {._1},
+    loadOp = .CLEAR,
+    storeOp = .STORE,
+    stencilLoadOp = .DONT_CARE,
+    stencilStoreOp = .DONT_CARE,
+    initialLayout = .UNDEFINED,
+    finalLayout = .PRESENT_SRC_KHR,
+  }
+  colorAttachmentRef := vk.AttachmentReference {
+    attachment = 0,
+    layout = .COLOR_ATTACHMENT_OPTIMAL,
+  }
+  subpass := vk.SubpassDescription {
+    pipelineBindPoint = .GRAPHICS,
+    colorAttachmentCount = 1,
+    pColorAttachments = &colorAttachmentRef,
+  }
+  renderPassCI := vk.RenderPassCreateInfo {
+    sType = .RENDER_PASS_CREATE_INFO,
+    attachmentCount = 1,
+    pAttachments = &colorAttachment,
+    subpassCount = 1,
+    pSubpasses = &subpass,
+  }
+  must(vk.CreateRenderPass(ctx.device, &renderPassCI, nil, &ctx.renderPass))
+}
+
 createGraphicsPipeline :: proc(){
   ctx.vertShaderModule=createShaderModule(SHADER_VERT)
   ctx.fragShaderModule=createShaderModule(SHADER_FRAG)
@@ -428,8 +464,8 @@ createGraphicsPipeline :: proc(){
     module = ctx.fragShaderModule,
     pName = "main"
   }
-  ctx.shader_stages[0]=vertShaderStageCI
-  ctx.shader_stages[1]=fragShaderStageCI
+  ctx.shaderStages[0]=vertShaderStageCI
+  ctx.shaderStages[1]=fragShaderStageCI
   
 	dynamicStates := []vk.DynamicState{.VIEWPORT, .SCISSOR}
   dynamicStateCI := vk.PipelineDynamicStateCreateInfo {
@@ -486,8 +522,63 @@ createGraphicsPipeline :: proc(){
     depthBiasSlopeFactor = 0.0,
   }
 
-  // TODO: left off here (multisampling)
+  multisamplingCI := vk.PipelineMultisampleStateCreateInfo {
+    sType = .PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+    sampleShadingEnable = false,
+    rasterizationSamples = {._1},
+    minSampleShading = 1.0,
+    pSampleMask = nil,
+    alphaToCoverageEnable = false,
+    alphaToOneEnable = false,
+  }
 
+  colorBlendAttachment:= vk.PipelineColorBlendAttachmentState {
+    colorWriteMask = {.R,.G,.B,.A},
+    blendEnable = true,
+    srcColorBlendFactor = .SRC_ALPHA,
+    dstColorBlendFactor = .ONE_MINUS_SRC_ALPHA,
+    colorBlendOp = .ADD,
+    srcAlphaBlendFactor = .ONE,
+    dstAlphaBlendFactor = .ZERO,
+    alphaBlendOp = .ADD,
+  }
+
+  colorBlendingCI := vk.PipelineColorBlendStateCreateInfo {
+    sType = .PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+    logicOpEnable = false,
+    logicOp = .COPY,
+    attachmentCount = 1,
+    pAttachments = &colorBlendAttachment,
+    blendConstants = {0,0,0,0},
+  }
+
+  pipelineLayoutCI := vk.PipelineLayoutCreateInfo {
+    sType = .PIPELINE_LAYOUT_CREATE_INFO,
+    setLayoutCount = 0,
+    pSetLayouts = nil,
+    pushConstantRangeCount = 0,
+    pPushConstantRanges = nil,
+  }
+  must(vk.CreatePipelineLayout(ctx.device, &pipelineLayoutCI, nil, &ctx.pipelineLayout))
+
+  pipelineCI := vk.GraphicsPipelineCreateInfo {
+    sType = .GRAPHICS_PIPELINE_CREATE_INFO,
+    stageCount = 2,
+    pStages = &ctx.shaderStages[0],
+    pVertexInputState = &vertexInputCI,
+    pInputAssemblyState = &inputAssemblyCI,
+    pViewportState = &viewportStateCI,
+    pRasterizationState = &rasterizerCI,
+    pMultisampleState = &multisamplingCI,
+    pDepthStencilState = nil,
+    pColorBlendState = &colorBlendingCI,
+    pDynamicState = &dynamicStateCI,
+    layout = ctx.pipelineLayout,
+    renderPass = ctx.renderPass,
+    subpass = 0,
+    basePipelineIndex = -1,
+  }
+  must(vk.CreateGraphicsPipelines(ctx.device, 0, 1, &pipelineCI, nil, &ctx.graphicsPipeline))
 }
 
 createShaderModule :: proc(code: []byte) -> (module: vk.ShaderModule) {
